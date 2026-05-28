@@ -404,6 +404,38 @@
     text-align: right;
   }
 
+  /* 메모 영역 */
+  .memo-input {
+    width: 100%;
+    border: 1px solid var(--line);
+    background: var(--paper);
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-family: inherit;
+    font-size: 14px;
+    color: var(--ink);
+    resize: vertical;
+    min-height: 100px;
+    line-height: 1.6;
+    transition: border-color 0.15s ease;
+  }
+
+  .memo-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  .memo-input::placeholder {
+    color: var(--muted);
+  }
+
+  .memo-hint {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+
   /* 액션 버튼들 */
   .actions {
     display: grid;
@@ -564,6 +596,15 @@
       <div class="legend" id="legend"></div>
     </div>
 
+    <div class="card">
+      <span class="step-label">MEMO</span>
+      <h2>📝 메모</h2>
+      <textarea id="memoText" class="memo-input" 
+                placeholder="이번 주 매매 계획, 종목별 메모, 리밸런싱 아이디어..."
+                oninput="saveData()"></textarea>
+      <div class="memo-hint">자동 저장돼요. 이미지로 저장할 때 함께 포함됩니다.</div>
+    </div>
+
     <div class="actions actions-three">
       <button class="action-btn primary" onclick="saveAsImage()">📸 이미지로 저장하기</button>
       <div class="row-2">
@@ -601,9 +642,11 @@
   // 데이터 저장
   function saveData() {
     try {
+      const memoEl = document.getElementById('memoText');
       const data = {
         stocks: stocks,
         date: document.getElementById('snapshotDate').value,
+        memo: memoEl ? memoEl.value : '',
         savedAt: new Date().toISOString()
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
@@ -634,6 +677,11 @@
   document.getElementById('snapshotDate').value = 
     savedData?.date || formatDateForInput(new Date());
 
+  // 메모: 저장된 거 있으면 복원
+  if (savedData?.memo) {
+    document.getElementById('memoText').value = savedData.memo;
+  }
+
   // 날짜 변경 시 자동 저장
   document.getElementById('snapshotDate').addEventListener('change', saveData);
 
@@ -645,14 +693,15 @@
     stocks.forEach((stock, idx) => {
       const row = document.createElement('div');
       row.className = 'stock-row';
+      const displayAmount = stock.amount ? Number(stock.amount).toLocaleString('ko-KR') : '';
       row.innerHTML = `
         <div class="stock-num">${idx + 1}</div>
         <input type="text" placeholder="종목명" value="${escapeAttr(stock.name)}" 
                oninput="updateStock(${idx}, 'name', this.value)" maxlength="20">
         <div class="amount-wrap">
-          <input type="number" placeholder="0" value="${stock.amount}" min="0"
+          <input type="text" placeholder="0" value="${displayAmount}"
                  inputmode="numeric"
-                 oninput="updateStock(${idx}, 'amount', this.value)">
+                 oninput="updateAmount(${idx}, this)">
         </div>
         <button class="delete-row-btn" onclick="removeStock(${idx})" 
                 ${stocks.length <= 1 ? 'disabled' : ''} title="삭제">
@@ -679,6 +728,37 @@
 
   function updateStock(idx, field, value) {
     stocks[idx][field] = value;
+    saveData();
+  }
+
+  // 금액 입력 처리 - 콤마 자동 추가
+  function updateAmount(idx, input) {
+    // 커서 위치 기억
+    const cursorPos = input.selectionStart;
+    const oldValue = input.value;
+    const oldCommasBefore = (oldValue.slice(0, cursorPos).match(/,/g) || []).length;
+    
+    // 숫자만 추출
+    const rawNumber = input.value.replace(/[^0-9]/g, '');
+    
+    // 빈 값이면 그냥 저장
+    if (rawNumber === '') {
+      stocks[idx].amount = '';
+      input.value = '';
+      saveData();
+      return;
+    }
+    
+    // 콤마 포맷
+    const formatted = Number(rawNumber).toLocaleString('ko-KR');
+    stocks[idx].amount = rawNumber;
+    input.value = formatted;
+    
+    // 커서 위치 복원 (콤마 개수 차이만큼 보정)
+    const newCommasBefore = (formatted.slice(0, cursorPos).match(/,/g) || []).length;
+    const newCursorPos = cursorPos + (newCommasBefore - oldCommasBefore);
+    input.setSelectionRange(newCursorPos, newCursorPos);
+    
     saveData();
   }
 
@@ -885,7 +965,35 @@
     }, duration);
   }
 
-  // 이미지로 저장 - Canvas로 차트 + 종목 리스트 그리기
+  // 텍스트를 여러 줄로 나누는 헬퍼
+  function wrapText(ctx, text, maxWidth) {
+    if (!text) return [];
+    const lines = [];
+    // 명시적 줄바꿈 먼저 처리
+    const paragraphs = text.split('\n');
+    
+    paragraphs.forEach(paragraph => {
+      if (paragraph === '') {
+        lines.push('');
+        return;
+      }
+      let currentLine = '';
+      for (const char of paragraph) {
+        const testLine = currentLine + char;
+        if (ctx.measureText(testLine).width > maxWidth && currentLine !== '') {
+          lines.push(currentLine);
+          currentLine = char;
+        } else {
+          currentLine = testLine;
+        }
+      }
+      if (currentLine !== '') lines.push(currentLine);
+    });
+    
+    return lines;
+  }
+
+  // 이미지로 저장 - Canvas로 차트 + 종목 리스트 + 메모 그리기
   async function saveAsImage() {
     const valid = stocks
       .map(s => ({
@@ -910,13 +1018,32 @@
     });
 
     const dateStr = formatDateDisplay(document.getElementById('snapshotDate').value);
+    const memoText = document.getElementById('memoText').value.trim();
 
-    // 캔버스 크기 (인스타 1:1.25 비율 기준)
+    // 캔버스 너비
     const W = 1080;
     const lineHeight = 75;
     const baseHeight = 1100;
     const extraPerItem = Math.max(0, items.length - 5) * lineHeight;
-    const H = baseHeight + extraPerItem;
+    
+    // 메모가 있으면 높이 추가 계산
+    let memoHeight = 0;
+    let memoLines = [];
+    const memoLineHeight = 42;
+    const memoPaddingX = 80;
+    const memoTextWidth = W - 200; // 좌우 padding 100씩
+    
+    if (memoText) {
+      // 임시 캔버스로 줄 수 계산
+      const tmpCanvas = document.createElement('canvas');
+      const tmpCtx = tmpCanvas.getContext('2d');
+      tmpCtx.font = '500 28px Pretendard, sans-serif';
+      memoLines = wrapText(tmpCtx, memoText, memoTextWidth);
+      // 메모 박스 높이: 헤더(50) + 내용(줄당 42) + padding(60)
+      memoHeight = 110 + memoLines.length * memoLineHeight;
+    }
+    
+    const H = baseHeight + extraPerItem + memoHeight;
 
     const canvas = document.createElement('canvas');
     canvas.width = W;
@@ -933,7 +1060,7 @@
     roundRect(ctx, 60, 60, W - 120, 200, 24);
     ctx.fill();
 
-    // 날짜 (작게)
+    // 날짜
     ctx.fillStyle = 'rgba(255,255,255,0.6)';
     ctx.font = '500 22px "IBM Plex Mono", monospace';
     ctx.textAlign = 'center';
@@ -949,7 +1076,7 @@
     ctx.font = '600 56px "IBM Plex Mono", monospace';
     ctx.fillText(fmt(total) + '원', W / 2, 225);
 
-    // 파이 차트 그리기
+    // 파이 차트
     const cx = W / 2;
     const cy = 470;
     const outerR = 180;
@@ -969,12 +1096,10 @@
       ctx.closePath();
       ctx.fill();
 
-      // 흰색 테두리 (구분선)
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 3;
       ctx.stroke();
 
-      // 8% 이상이면 차트 안에 % 표시
       if (item.pct >= 8) {
         const midAngle = currentAngle + sliceAngle / 2;
         const labelR = (outerR + innerR) / 2;
@@ -1051,6 +1176,39 @@
       }
     });
 
+    // 메모 영역 그리기
+    if (memoText) {
+      const listEndY = listStartY + (items.length - 1) * lineHeight + 30;
+      const memoBoxY = listEndY + 40;
+      const memoBoxX = 60;
+      const memoBoxW = W - 120;
+      
+      // 메모 박스 배경 (옅은 노란색)
+      ctx.fillStyle = '#fffbeb';
+      ctx.beginPath();
+      roundRect(ctx, memoBoxX, memoBoxY, memoBoxW, memoHeight - 20, 16);
+      ctx.fill();
+      
+      // 메모 박스 테두리
+      ctx.strokeStyle = '#fde68a';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      
+      // 메모 헤더
+      ctx.fillStyle = '#92400e';
+      ctx.font = '600 22px Pretendard, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText('📝 메모', memoBoxX + 30, memoBoxY + 42);
+      
+      // 메모 내용
+      ctx.fillStyle = '#3a3528';
+      ctx.font = '500 28px Pretendard, sans-serif';
+      memoLines.forEach((line, idx) => {
+        ctx.fillText(line, memoBoxX + 30, memoBoxY + 90 + idx * memoLineHeight);
+      });
+    }
+
     // 푸터
     const footerY = H - 50;
     ctx.fillStyle = '#9ca3af';
@@ -1094,13 +1252,14 @@
   }
 
   function resetAll() {
-    if (!confirm('모든 종목 정보를 지우고 처음부터 다시 시작할까요?')) return;
+    if (!confirm('모든 종목 정보와 메모를 지우고 처음부터 다시 시작할까요?')) return;
     stocks = [
       { name: '', amount: '' },
       { name: '', amount: '' },
       { name: '', amount: '' }
     ];
     document.getElementById('snapshotDate').value = formatDateForInput(new Date());
+    document.getElementById('memoText').value = '';
     document.getElementById('resultSection').classList.remove('show');
     localStorage.removeItem(STORAGE_KEY);
     renderStocks();
